@@ -1,0 +1,20 @@
+name:                nexusdownloader
+version:             0.1.0.0
+-- synopsis:
+-- description:
+homepage:            https://github.com/AdituV/nexusdownloader#readme
+license:             BSD3
+license-file:        LICENSE
+author:              Iris Ward
+maintainer:          aditu.venyhandottir@gmail.com
+copyright:           2017 Iris Ward
+category:            Web
+build-type:          Simple
+cabal-version:       >=1.10
+extra-source-files:  README.md
+
+executable nexusdownloader
+  hs-source-dirs:      src
+  main-is:             Main.hs
+  default-language:    Haskell2010
+  build-depends:       base >= 4.7 && < 5
