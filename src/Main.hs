@@ -1,13 +1,13 @@
-{-# LANGUAGE FlexibleContexts      #-}
-{-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE NamedFieldPuns        #-}
-{-# LANGUAGE OverloadedStrings     #-}
-{-# LANGUAGE RecordWildCards       #-}
-{-# LANGUAGE ScopedTypeVariables   #-}
-{-# LANGUAGE TypeApplications      #-}
+{-# LANGUAGE DisambiguateRecordFields #-}
+{-# LANGUAGE FlexibleContexts         #-}
+{-# LANGUAGE MultiParamTypeClasses    #-}
+{-# LANGUAGE NamedFieldPuns           #-}
+{-# LANGUAGE OverloadedStrings        #-}
+{-# LANGUAGE RecordWildCards          #-}
+{-# LANGUAGE ScopedTypeVariables      #-}
+{-# LANGUAGE TypeApplications         #-}
 module Main where
 
---import SuperRecord
 import           Control.Exception     (bracket_)
 import           Control.Monad.Reader
 import           Data.Aeson
@@ -16,6 +16,7 @@ import qualified Data.ByteString       as B
 import qualified Data.ByteString.Char8 as C8S
 import           Data.Coerce           (coerce)
 import           Data.IORef
+import           Data.Semigroup        ((<>))
 import           Data.String           (IsString (..))
 import           Data.Time.Clock       (addUTCTime, getCurrentTime)
 import           Lens.Micro
@@ -54,23 +55,39 @@ mkDefaultEnv = do
   pure Env{..}
 
 data ModFile = ModFile
-  { _friendlyName :: String
-  , _modId        :: Int
-  , _fileId       :: Int
+  { _name    :: String
+  , _modId   :: Int
+  , _fileId  :: Int
+  , _ownerId :: Int
+  , _uri     :: String
+  , _size    :: Int
+  , _version :: String
   } deriving Show
+
+instance FromJSON ModFile where
+  parseJSON = withObject "ModFile" $
+    \v ->  ModFile
+       <$> v .: "name"
+       <*> v .: "mod_id"
+       <*> v .: "id"
+       <*> v .: "owner_id"
+       <*> v .: "uri"
+       <*> (read <$> v .: "size")
+       <*> v .: "version"
+
+showBS :: Show a => a -> ByteString
+showBS x = fromString $ show x
 
 -- * Standard IO Utilities
 
-getUsername :: IO ByteString
-getUsername = do
-  putStr "Username: "
-  hFlush stdout
-  B.getLine
+runWithLabel :: MonadIO m => String -> m a -> m a
+runWithLabel lab action = do
+  liftIO $ putStr (lab ++ ": ")
+  liftIO $ hFlush stdout
+  action
 
 getPassword :: IO ByteString
-getPassword = do
-  putStr "Password: "
-  hFlush stdout
+getPassword = runWithLabel "Password" $ do
   pass <- withEcho False B.getLine
   putChar '\n'
   return pass
@@ -110,7 +127,7 @@ mkRequest endpoint params = do
   let userAgent = "Nexus Client v" `mappend` _nmmVer
   let req = defaultRequest
               {host=_baseurl, port=443, path, secure=True, cookieJar=Just jar}
-              & setRequestHeader "UserAgent" [userAgent]
+              & setRequestHeader "User-Agent" [userAgent]
               & setRequestQueryString params
   pure req
 
@@ -125,28 +142,39 @@ login user pass = do
   response <- liftIO $ httpJSON @_ @(Maybe' String) req
   let token = coerce (getResponseBody response) :: Maybe String
   case token of
-    Nothing -> pure False
+    Nothing -> do
+      liftIO $ putStrLn "Login failed."
+      pure False
     Just tok -> do
+      liftIO $ putStrLn "Login succeeded!"
       sidCookie <- mkCookie "sid" (fromString tok)
       liftIO $ modifyIORef _cookies
         (\jar -> insertCheckedCookie sidCookie jar True)
       pure True
+
+getModInfo :: (MonadReader Env m, MonadIO m) => ByteString -> m [ModFile]
+getModInfo modId = do
+  Env{_gameid} <- ask
+  req <- mkRequest ("Files/indexfrommod/" <> modId) [("game_id", Just (showBS _gameid))]
+  response <- liftIO $ httpJSON req
+  pure $ getResponseBody response
 
 main :: IO ()
 main = do
   env <- mkDefaultEnv
   flip runReaderT env $ do
     Env{..} <- ask
-    user <- liftIO getUsername
+    user <- liftIO $ runWithLabel "Username" B.getLine
     pass <- liftIO getPassword
     loggedin <- login user pass
     if loggedin then do
-      liftIO $ putStrLn "Login succeeded!"
-      allCookies <- liftIO $ destroyCookieJar <$> readIORef _cookies
-      let Just sidCookie =  allCookies
-                         ^? each
-                         .  filtered (\Cookie{..} -> cookie_name == "sid")
-      liftIO $ putStr "Token: "
-      liftIO $ C8S.putStrLn (cookie_value sidCookie)
+      modid <- liftIO $ runWithLabel "ModId" B.getLine
+      modInfo <- getModInfo modid
+      case modInfo of
+        [] -> liftIO $ putStrLn "No files found"
+        xs@(x:_) -> liftIO $ do
+          putStrLn $ "Mod: " <> _name x
+          putStrLn $ "Number of files: " <> show (length xs)
+          putStrLn $ "First file download: " <> _uri x
     else
-      liftIO $ putStrLn "Login failed."
+      pure ()
