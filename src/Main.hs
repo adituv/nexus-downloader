@@ -1,38 +1,52 @@
 {-# LANGUAGE FlexibleContexts      #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE NamedFieldPuns        #-}
 {-# LANGUAGE OverloadedStrings     #-}
 {-# LANGUAGE RecordWildCards       #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE TypeApplications      #-}
 module Main where
 
 --import SuperRecord
-import           Control.Exception
+import           Control.Exception     (bracket_)
 import           Control.Monad.Reader
-import qualified Data.ByteString.Char8        as C8S
-import qualified Data.ByteString.Lazy         as B
-import qualified Data.ByteString.Lazy.Char8   as C8
+import           Data.Aeson
+import           Data.ByteString       (ByteString)
+import qualified Data.ByteString       as B
+import qualified Data.ByteString.Char8 as C8S
+import           Data.Coerce           (coerce)
 import           Data.IORef
-import           Data.List                    (foldl')
-import           Data.String
-import qualified Data.Text                    as T
-import           Data.Time.Clock
+import           Data.String           (IsString (..))
+import           Data.Time.Clock       (addUTCTime, getCurrentTime)
 import           Lens.Micro
-import           Network.HTTP.Client          (Cookie (..), CookieJar (..),
-                                               insertCheckedCookie)
-import           Network.HTTP.Client.Internal (expose)
-import           Network.Wreq
-import           System.IO
+import           Network.HTTP.Client   (insertCheckedCookie)
+import           Network.HTTP.Conduit  (Cookie (..), CookieJar (..),
+                                        Request (..), destroyCookieJar)
+import           Network.HTTP.Simple
+import           System.IO             (hFlush, hGetEcho, hSetEcho, stdin,
+                                        stdout)
 
 data Env = Env
-  { _baseurl :: String
-  , _game    :: String
+  { _baseurl :: ByteString
+  , _game    :: ByteString
   , _gameid  :: Int
-  , _nmmVer  :: String
+  , _nmmVer  :: ByteString
   , _cookies :: IORef CookieJar
   }
 
+type Params = [(ByteString, Maybe ByteString)]
+
+newtype Maybe' a = Maybe' (Maybe a) deriving Show
+
+instance forall a. FromJSON a => FromJSON (Maybe' a) where
+  parseJSON v = do
+    case fromJSON v :: Result a of
+      Success a -> pure $ Maybe' (Just a)
+      _         -> pure $ Maybe' (Nothing)
+
 mkDefaultEnv :: IO Env
 mkDefaultEnv = do
-  let _baseurl = "https://www.nexusmods.com"
+  let _baseurl = "www.nexusmods.com"
   let _game = "skyrim"
   let _gameid = 110
   let _nmmVer = "0.63.17"
@@ -45,58 +59,78 @@ data ModFile = ModFile
   , _fileId       :: Int
   } deriving Show
 
-getUsername :: IO String
+-- * Standard IO Utilities
+
+getUsername :: IO ByteString
 getUsername = do
   putStr "Username: "
   hFlush stdout
-  getLine
+  B.getLine
 
-getPassword :: IO String
+getPassword :: IO ByteString
 getPassword = do
   putStr "Password: "
   hFlush stdout
-  pass <- withEcho False getLine
+  pass <- withEcho False B.getLine
   putChar '\n'
   return pass
 
--- The nexus server requires the action parameter to be first while wreq does
--- not guarantee generating the query string in the correct order.  This is a
--- very quick and inefficient workaround
-queryString :: String -> [(String, String)] -> String
-queryString action params' = concat ["?", action, kvParams]
-  where
-    kvParams = concat $ concatMap (\(k,v) -> ["&", k, "=", v]) params'
-
+-- | Run an IO action with echoing (displaying what is typed) on stdin turned
+--   temporarily on or off, restoring the old value after.
 withEcho :: Bool -> IO a -> IO a
 withEcho echo action = do
   old <- hGetEcho stdin
   bracket_ (hSetEcho stdin echo) (hSetEcho stdin old) action
 
-request :: String -> String -> String -> String -> [(String, String)] -> IO (Response B.ByteString)
-request base game endpoint action params' = do
-  let url = concat [base, "/", game, "/", endpoint, queryString action params']
-  get url
+-- * Requests and methods
 
-login :: (MonadIO m, MonadReader Env m) => String -> String -> m Bool
-login user pass = do
-  let endpoint = "Sessions"
+mkCookie :: (MonadIO m, MonadReader Env m) => ByteString -> ByteString -> m Cookie
+mkCookie name value = do
   Env{..} <- ask
-  response <- liftIO $ request _baseurl _game endpoint "Login" [("username", user), ("password", pass)]
-  let token = response ^. responseBody
-  case B.stripSuffix "\"" token >>= B.stripPrefix "\"" of
-    Nothing -> pure False
-    Just tok' -> do
-      now <- liftIO getCurrentTime
-      let expires = addUTCTime (30*1440) now
-      let cookie = Cookie "sid" (B.toStrict tok') expires (fromString _baseurl) "/" now now True True True True
-      liftIO $ modifyIORef' _cookies (\jar -> insertCheckedCookie cookie jar True)
-      pure True
+  now <- liftIO getCurrentTime
+  let inAMonth = addUTCTime (30*1440) now
+  pure Cookie { cookie_name = name
+              , cookie_value = value
+              , cookie_expiry_time = inAMonth
+              , cookie_domain = _baseurl
+              , cookie_path = "/"
+              , cookie_creation_time = now
+              , cookie_last_access_time = now
+              , cookie_persistent = True
+              , cookie_host_only = True
+              , cookie_secure_only = True
+              , cookie_http_only = True
+              }
 
-validateToken :: B.ByteString -> IO Bool
-validateToken token = do
-  let queryString = "Validate"
-  response <- get ("https://www.nexusmods.com/skyrim/Sessions?" ++ queryString)
-  return $ (response ^. responseBody) /= "null"
+mkRequest :: (MonadIO m, MonadReader Env m) => ByteString -> Params -> m Request
+mkRequest endpoint params = do
+  Env{..} <- ask
+  jar <- liftIO $ readIORef _cookies
+  let path = B.concat ["/", _game, "/", endpoint]
+  let userAgent = "Nexus Client v" `mappend` _nmmVer
+  let req = defaultRequest
+              {host=_baseurl, port=443, path, secure=True, cookieJar=Just jar}
+              & setRequestHeader "UserAgent" [userAgent]
+              & setRequestQueryString params
+  pure req
+
+login :: (MonadReader Env m, MonadIO m) => ByteString -> ByteString -> m Bool
+login user pass = do
+  Env{..} <- ask
+  let params = [ ("Login", Nothing)
+               , ("username", Just user)
+               , ("password", Just pass)
+               ]
+  req <- mkRequest "Sessions" params
+  response <- liftIO $ httpJSON @_ @(Maybe' String) req
+  let token = coerce (getResponseBody response) :: Maybe String
+  case token of
+    Nothing -> pure False
+    Just tok -> do
+      sidCookie <- mkCookie "sid" (fromString tok)
+      liftIO $ modifyIORef _cookies
+        (\jar -> insertCheckedCookie sidCookie jar True)
+      pure True
 
 main :: IO ()
 main = do
@@ -108,9 +142,11 @@ main = do
     loggedin <- login user pass
     if loggedin then do
       liftIO $ putStrLn "Login succeeded!"
-      allCookies <- liftIO $ expose <$> readIORef _cookies
-      let Just sidCookie = allCookies ^? each . filtered (\Cookie{..} -> cookie_name == "sid")
+      allCookies <- liftIO $ destroyCookieJar <$> readIORef _cookies
+      let Just sidCookie =  allCookies
+                         ^? each
+                         .  filtered (\Cookie{..} -> cookie_name == "sid")
       liftIO $ putStr "Token: "
-      liftIO $ C8S.putStrLn (sidCookie ^. cookieValue)
+      liftIO $ C8S.putStrLn (cookie_value sidCookie)
     else
       liftIO $ putStrLn "Login failed."
