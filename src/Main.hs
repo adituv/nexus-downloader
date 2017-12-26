@@ -10,6 +10,7 @@
 {-# LANGUAGE TypeApplications         #-}
 module Main where
 
+import           Conduit
 import           Control.Exception     (bracket_)
 import           Control.Monad.IfElse
 import           Control.Monad.Reader
@@ -17,7 +18,6 @@ import           Data.Aeson
 import           Data.ByteString       (ByteString)
 import qualified Data.ByteString       as B
 import qualified Data.ByteString.Char8 as C8S
-import           Data.Coerce           (coerce)
 import           Data.IORef
 import           Data.Semigroup        ((<>))
 import qualified Data.Serialize        as C
@@ -28,7 +28,8 @@ import           Lens.Micro
 import           Network.HTTP.Client   (insertCheckedCookie)
 import           Network.HTTP.Conduit  (Cookie (..), CookieJar (..),
                                         Request (..), createCookieJar,
-                                        destroyCookieJar, responseCookieJar)
+                                        destroyCookieJar, http, newManager,
+                                        responseCookieJar, tlsManagerSettings)
 import           Network.HTTP.Simple
 import           System.Directory      (doesFileExist)
 import           System.Exit           (exitFailure)
@@ -51,7 +52,9 @@ instance Show Env where
     , "  , _game = " ++ show _game
     , "  , _gameid = " ++ show _gameid
     , "  , _nmmVer = " ++ show _nmmVer
-    , "  , _cookies = IORef (" ++ show cookies ++ ")"]
+    , "  , _cookies = IORef (" ++ show cookies ++ ")"
+    , "  }"
+    ]
     where
       cookies = unsafePerformIO (readIORef _cookies)
 
@@ -75,14 +78,6 @@ instance C.Serialize Env where
       pure Env{..}
 
 type Params = [(ByteString, Maybe ByteString)]
-
-newtype Maybe' a = Maybe' (Maybe a) deriving Show
-
-instance forall a. FromJSON a => FromJSON (Maybe' a) where
-  parseJSON v = do
-    case fromJSON v :: Result a of
-      Success a -> pure $ Maybe' (Just a)
-      _         -> pure $ Maybe' (Nothing)
 
 mkDefaultEnv :: IO Env
 mkDefaultEnv = do
@@ -114,6 +109,7 @@ data ModInfo = ModInfo
   , _version    :: String
   , _author     :: String
   , _lastupdate :: DotNetTime
+  , _modPageUri :: String
   } deriving (Generic, Show)
 
 instance FromJSON ModInfo where
@@ -123,24 +119,18 @@ instance FromJSON ModInfo where
 
 data ModFile = ModFile
   { _name    :: String
+  , _id      :: Int
   , _modId   :: Int
-  , _fileId  :: Int
   , _ownerId :: Int
   , _uri     :: String
-  , _size    :: Int
+  , _size    :: String
   , _version :: String
-  } deriving Show
+  } deriving (Generic, Show)
 
 instance FromJSON ModFile where
-  parseJSON = withObject "ModFile" $
-    \v ->  ModFile
-       <$> v .: "name"
-       <*> v .: "mod_id"
-       <*> v .: "id"
-       <*> v .: "owner_id"
-       <*> v .: "uri"
-       <*> (read <$> v .: "size")
-       <*> v .: "version"
+  parseJSON = genericParseJSON defaultOptions {
+      fieldLabelModifier = camelTo2 '_' . drop 1
+    }
 
 showBS :: Show a => a -> ByteString
 showBS x = fromString $ show x
@@ -211,6 +201,13 @@ httpJSON' request = do
   liftIO $ writeIORef _cookies (responseCookieJar response)
   pure response
 
+download :: Request -> FilePath -> IO ()
+download req dest = runConduitRes $ do
+  mgr <- liftIO $ newManager tlsManagerSettings
+  src <- http req mgr
+  let body = getResponseBody src
+  body $$+- sinkFile dest
+
 login :: (MonadReader Env m, MonadIO m) => ByteString -> ByteString -> m Bool
 login user pass = do
   Env{..} <- ask
@@ -219,15 +216,14 @@ login user pass = do
                , ("password", Just pass)
                ]
   req <- mkRequest "Sessions" params
-  response <- httpJSON' @_ @(Maybe' String) req
-  let Maybe' token = getResponseBody response
-  case token of
+  response <- httpJSON' @_ @(Maybe String) req
+  case getResponseBody response of
     Nothing -> do
       liftIO $ putStrLn "Login failed."
       pure False
-    Just tok -> do
+    Just token -> do
       liftIO $ putStrLn "Login succeeded!"
-      sidCookie <- mkCookie "sid" (fromString tok)
+      sidCookie <- mkCookie "sid" (fromString token)
       liftIO $ modifyIORef _cookies
         (\jar -> insertCheckedCookie sidCookie jar True)
       pure True
@@ -236,10 +232,10 @@ validate :: (MonadReader Env m, MonadIO m) => m Bool
 validate = do
   let params = [("Validate", Nothing)]
   req <- mkRequest "Sessions" params
-  response <- httpJSON' @_ @(Maybe' String) req
+  response <- httpJSON' @_ @(Maybe String) req
   case getResponseBody response of
-    Maybe' Nothing -> pure False
-    Maybe' _       -> pure True
+    Nothing -> pure False
+    _       -> pure True
 
 getModInfo :: (MonadReader Env m, MonadIO m) => ByteString -> m ModInfo
 getModInfo modId = do

@@ -21,12 +21,13 @@ executable nexusdownloader
                      , aeson
                      , bytestring
                      , cereal
-                     , conduit
+                     , conduit-combinators
                      , directory
                      , http-client
                      , http-conduit
                      , IfElse
                      , microlens
                      , mtl
+                     , resourcet
                      , text
                      , time
