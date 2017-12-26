@@ -18,6 +18,7 @@ import           Data.Aeson
 import           Data.ByteString       (ByteString)
 import qualified Data.ByteString       as B
 import qualified Data.ByteString.Char8 as C8S
+import           Data.Char             (toUpper)
 import           Data.IORef
 import           Data.Semigroup        ((<>))
 import qualified Data.Serialize        as C
@@ -132,6 +133,19 @@ instance FromJSON ModFile where
       fieldLabelModifier = camelTo2 '_' . drop 1
     }
 
+data FileDownloadInfo = FileDownloadInfo
+  { _URI            :: String
+  , _isPremium      :: Bool
+  , _name           :: String
+  , _country        :: String
+  , _connectedUsers :: Int
+  } deriving (Generic, Show)
+
+instance FromJSON FileDownloadInfo where
+  parseJSON = genericParseJSON defaultOptions {
+      fieldLabelModifier = (\(~[h],t) -> toUpper h : t) . splitAt 1 . drop 1
+    }
+
 showBS :: Show a => a -> ByteString
 showBS x = fromString $ show x
 
@@ -181,17 +195,21 @@ getCookie name jar =  destroyCookieJar jar
                    ^? each
                    .  filtered (\Cookie{..} -> cookie_name == name)
 
-mkRequest :: (MonadIO m, MonadReader Env m) => ByteString -> Params -> m Request
-mkRequest endpoint params = do
+mkRequest :: (MonadIO m, MonadReader Env m) => ByteString -> ByteString -> Params -> m Request
+mkRequest baseurl endpoint params = do
   Env{..} <- ask
   jar <- liftIO $ readIORef _cookies
-  let path = B.concat ["/", _game, "/", endpoint]
   let userAgent = "Nexus Client v" `mappend` _nmmVer
   let req = defaultRequest
-              {host=_baseurl, port=443, path, secure=True, cookieJar=Just jar}
+              {host=baseurl, port=443, path=endpoint, secure=True, cookieJar=Just jar}
               & setRequestHeader "User-Agent" [userAgent]
               & setRequestQueryString params
   pure req
+
+mkNexusRequest :: (MonadIO m, MonadReader Env m) => ByteString -> Params -> m Request
+mkNexusRequest endpoint params = do
+  Env{..} <- ask
+  mkRequest _baseurl (B.concat ["/", _game, "/", endpoint]) params
 
 -- Also update the cookie jar
 httpJSON' :: (MonadIO m, MonadReader Env m, FromJSON a) => Request -> m (Response a)
@@ -215,7 +233,7 @@ login user pass = do
                , ("username", Just user)
                , ("password", Just pass)
                ]
-  req <- mkRequest "Sessions" params
+  req <- mkNexusRequest "Sessions" params
   response <- httpJSON' @_ @(Maybe String) req
   case getResponseBody response of
     Nothing -> do
@@ -231,16 +249,30 @@ login user pass = do
 validate :: (MonadReader Env m, MonadIO m) => m Bool
 validate = do
   let params = [("Validate", Nothing)]
-  req <- mkRequest "Sessions" params
+  req <- mkNexusRequest "Sessions" params
   response <- httpJSON' @_ @(Maybe String) req
   case getResponseBody response of
     Nothing -> pure False
     _       -> pure True
 
-getModInfo :: (MonadReader Env m, MonadIO m) => ByteString -> m ModInfo
+getModInfo :: (MonadReader Env m, MonadIO m) => Int -> m ModInfo
 getModInfo modId = do
   Env{_gameid} <- ask
-  req <- mkRequest ("Mods/" <> modId) [("game_id", Just (showBS _gameid))]
+  req <- mkNexusRequest ("Mods/" <> showBS modId) [("game_id", Just (showBS _gameid))]
+  response <- httpJSON' req
+  pure $ getResponseBody response
+
+getModFiles :: (MonadReader Env m, MonadIO m) => Int -> m [ModFile]
+getModFiles modId = do
+  Env{_gameid} <- ask
+  req <- mkNexusRequest ("Files/indexfrommod/" <> showBS modId) [("game_id", Just (showBS _gameid))]
+  response <- httpJSON' req
+  pure $ getResponseBody response
+
+getDownloadInfo :: (MonadReader Env m, MonadIO m) => Int -> m [FileDownloadInfo]
+getDownloadInfo fileId = do
+  Env{_gameid} <- ask
+  req <- mkNexusRequest ("Files/download/" <> showBS fileId) [("game_id", Just (showBS _gameid))]
   response <- httpJSON' req
   pure $ getResponseBody response
 
@@ -253,8 +285,20 @@ main = do
       user <- liftIO $ runWithLabel "Username" B.getLine
       pass <- liftIO getPassword
       unlessM (login user pass) (liftIO exitFailure)
-    modid <- liftIO $ runWithLabel "ModId" B.getLine
+    modid <- liftIO $ runWithLabel "ModId" (read <$> getLine)
     ModInfo{..} <- getModInfo modid
     liftIO $ putStrLn $ "Mod: " <> _name
     liftIO $ putStrLn $ "Summary: " <> _summary
+    files <- getModFiles modid
+    case files of
+      [] -> liftIO $ putStrLn "No mod files." >> exitFailure
+      (ModFile{_id=fileid,_uri=filename}:_) -> do
+        downloads <- getDownloadInfo fileid
+        case downloads of
+          [] -> liftIO $ putStrLn "No download locations." >> exitFailure
+          (FileDownloadInfo{..}:_) -> do
+            req <- parseRequest _URI
+            req' <- mkRequest (host req) (path req) []
+            let req'' = req' { queryString = queryString req }
+            liftIO $ download req'' filename
   B.writeFile configFile (C.encode env)
