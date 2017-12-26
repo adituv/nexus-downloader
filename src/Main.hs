@@ -9,6 +9,7 @@
 module Main where
 
 import           Control.Exception     (bracket_)
+import           Control.Monad.IfElse
 import           Control.Monad.Reader
 import           Data.Aeson
 import           Data.ByteString       (ByteString)
@@ -17,15 +18,20 @@ import qualified Data.ByteString.Char8 as C8S
 import           Data.Coerce           (coerce)
 import           Data.IORef
 import           Data.Semigroup        ((<>))
+import qualified Data.Serialize        as C
 import           Data.String           (IsString (..))
 import           Data.Time.Clock       (addUTCTime, getCurrentTime)
 import           Lens.Micro
 import           Network.HTTP.Client   (insertCheckedCookie)
 import           Network.HTTP.Conduit  (Cookie (..), CookieJar (..),
-                                        Request (..), destroyCookieJar)
+                                        Request (..), createCookieJar,
+                                        destroyCookieJar, responseCookieJar)
 import           Network.HTTP.Simple
+import           System.Directory      (doesFileExist)
+import           System.Exit           (exitFailure)
 import           System.IO             (hFlush, hGetEcho, hSetEcho, stdin,
                                         stdout)
+import           System.IO.Unsafe      (unsafePerformIO)
 
 data Env = Env
   { _baseurl :: ByteString
@@ -34,6 +40,25 @@ data Env = Env
   , _nmmVer  :: ByteString
   , _cookies :: IORef CookieJar
   }
+
+instance C.Serialize Env where
+  put Env{..} = do
+      C.put _baseurl
+      C.put _game
+      C.put _gameid
+      C.put _nmmVer
+      C.put (show <$> destroyCookieJar cookies)
+    where
+      cookies = unsafePerformIO (readIORef _cookies)
+
+  get = do
+      _baseurl <- C.get
+      _game <- C.get
+      _gameid <- C.get
+      _nmmVer <- C.get
+      cookies <- fmap read <$> C.get @[String]
+      let _cookies = unsafePerformIO $ newIORef (createCookieJar cookies)
+      pure Env{..}
 
 type Params = [(ByteString, Maybe ByteString)]
 
@@ -53,6 +78,21 @@ mkDefaultEnv = do
   let _nmmVer = "0.63.17"
   _cookies <- newIORef mempty
   pure Env{..}
+
+configFile :: String
+configFile = "nexusdownloader.cfg"
+
+getStoredEnv :: IO Env
+getStoredEnv = do
+  exists <- doesFileExist configFile
+  if exists then do
+    file <- B.readFile configFile
+    case C.decode file of
+      Right env -> pure env
+      _         -> mkDefaultEnv
+  else
+    mkDefaultEnv
+
 
 data ModFile = ModFile
   { _name    :: String
@@ -115,9 +155,14 @@ mkCookie name value = do
               , cookie_last_access_time = now
               , cookie_persistent = True
               , cookie_host_only = True
-              , cookie_secure_only = True
+              , cookie_secure_only = False
               , cookie_http_only = True
               }
+
+getCookie :: ByteString -> CookieJar -> Maybe Cookie
+getCookie name jar =  destroyCookieJar jar
+                   ^? each
+                   .  filtered (\Cookie{..} -> cookie_name == name)
 
 mkRequest :: (MonadIO m, MonadReader Env m) => ByteString -> Params -> m Request
 mkRequest endpoint params = do
@@ -131,6 +176,14 @@ mkRequest endpoint params = do
               & setRequestQueryString params
   pure req
 
+-- Also update the cookie jar
+httpJSON' :: (MonadIO m, MonadReader Env m, FromJSON a) => Request -> m (Response a)
+httpJSON' request = do
+  Env{_cookies} <- ask
+  response <- httpJSON request
+  liftIO $ writeIORef _cookies (responseCookieJar response)
+  pure response
+
 login :: (MonadReader Env m, MonadIO m) => ByteString -> ByteString -> m Bool
 login user pass = do
   Env{..} <- ask
@@ -139,8 +192,8 @@ login user pass = do
                , ("password", Just pass)
                ]
   req <- mkRequest "Sessions" params
-  response <- liftIO $ httpJSON @_ @(Maybe' String) req
-  let token = coerce (getResponseBody response) :: Maybe String
+  response <- httpJSON' @_ @(Maybe' String) req
+  let Maybe' token = getResponseBody response
   case token of
     Nothing -> do
       liftIO $ putStrLn "Login failed."
@@ -152,29 +205,38 @@ login user pass = do
         (\jar -> insertCheckedCookie sidCookie jar True)
       pure True
 
+validate :: (MonadReader Env m, MonadIO m) => m Bool
+validate = do
+  let params = [("Validate", Nothing)]
+  req <- mkRequest "Sessions" params
+  response <- httpJSON' @_ @(Maybe' String) req
+  case getResponseBody response of
+    Maybe' Nothing -> pure False
+    Maybe' _       -> pure True
+
+
 getModInfo :: (MonadReader Env m, MonadIO m) => ByteString -> m [ModFile]
 getModInfo modId = do
   Env{_gameid} <- ask
   req <- mkRequest ("Files/indexfrommod/" <> modId) [("game_id", Just (showBS _gameid))]
-  response <- liftIO $ httpJSON req
+  response <- httpJSON' req
   pure $ getResponseBody response
 
 main :: IO ()
 main = do
-  env <- mkDefaultEnv
+  env <- getStoredEnv
   flip runReaderT env $ do
     Env{..} <- ask
-    user <- liftIO $ runWithLabel "Username" B.getLine
-    pass <- liftIO getPassword
-    loggedin <- login user pass
-    if loggedin then do
-      modid <- liftIO $ runWithLabel "ModId" B.getLine
-      modInfo <- getModInfo modid
-      case modInfo of
-        [] -> liftIO $ putStrLn "No files found"
-        xs@(x:_) -> liftIO $ do
-          putStrLn $ "Mod: " <> _name x
-          putStrLn $ "Number of files: " <> show (length xs)
-          putStrLn $ "First file download: " <> _uri x
-    else
-      pure ()
+    unlessM validate $ do
+      user <- liftIO $ runWithLabel "Username" B.getLine
+      pass <- liftIO getPassword
+      unlessM (login user pass) (liftIO exitFailure)
+    modid <- liftIO $ runWithLabel "ModId" B.getLine
+    modInfo <- getModInfo modid
+    case modInfo of
+      [] -> liftIO $ putStrLn "No files found"
+      xs@(x:_) -> liftIO $ do
+        putStrLn $ "Mod: " <> _name x
+        putStrLn $ "Number of files: " <> show (length xs)
+        putStrLn $ "First file download: " <> _uri x
+  B.writeFile configFile (C.encode env)

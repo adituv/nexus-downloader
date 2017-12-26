@@ -20,9 +20,12 @@ executable nexusdownloader
   build-depends:       base >= 4.7 && < 5
                      , aeson
                      , bytestring
+                     , cereal
                      , conduit
+                     , directory
                      , http-client
                      , http-conduit
+                     , IfElse
                      , microlens
                      , mtl
                      , text
