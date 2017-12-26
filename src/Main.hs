@@ -1,4 +1,6 @@
+{-# LANGUAGE DeriveGeneric            #-}
 {-# LANGUAGE DisambiguateRecordFields #-}
+{-# LANGUAGE DuplicateRecordFields    #-}
 {-# LANGUAGE FlexibleContexts         #-}
 {-# LANGUAGE MultiParamTypeClasses    #-}
 {-# LANGUAGE NamedFieldPuns           #-}
@@ -21,6 +23,7 @@ import           Data.Semigroup        ((<>))
 import qualified Data.Serialize        as C
 import           Data.String           (IsString (..))
 import           Data.Time.Clock       (addUTCTime, getCurrentTime)
+import           GHC.Generics
 import           Lens.Micro
 import           Network.HTTP.Client   (insertCheckedCookie)
 import           Network.HTTP.Conduit  (Cookie (..), CookieJar (..),
@@ -40,6 +43,17 @@ data Env = Env
   , _nmmVer  :: ByteString
   , _cookies :: IORef CookieJar
   }
+
+instance Show Env where
+  show Env{..} = unlines
+    [ "Env"
+    , "  { _baseurl = " ++ show _baseurl
+    , "  , _game = " ++ show _game
+    , "  , _gameid = " ++ show _gameid
+    , "  , _nmmVer = " ++ show _nmmVer
+    , "  , _cookies = IORef (" ++ show cookies ++ ")"]
+    where
+      cookies = unsafePerformIO (readIORef _cookies)
 
 instance C.Serialize Env where
   put Env{..} = do
@@ -93,6 +107,19 @@ getStoredEnv = do
   else
     mkDefaultEnv
 
+data ModInfo = ModInfo
+  { _name       :: String
+  , _id         :: Int
+  , _summary    :: String
+  , _version    :: String
+  , _author     :: String
+  , _lastupdate :: DotNetTime
+  } deriving (Generic, Show)
+
+instance FromJSON ModInfo where
+  parseJSON = genericParseJSON defaultOptions {
+      fieldLabelModifier = camelTo2 '_' . drop 1
+    }
 
 data ModFile = ModFile
   { _name    :: String
@@ -214,11 +241,10 @@ validate = do
     Maybe' Nothing -> pure False
     Maybe' _       -> pure True
 
-
-getModInfo :: (MonadReader Env m, MonadIO m) => ByteString -> m [ModFile]
+getModInfo :: (MonadReader Env m, MonadIO m) => ByteString -> m ModInfo
 getModInfo modId = do
   Env{_gameid} <- ask
-  req <- mkRequest ("Files/indexfrommod/" <> modId) [("game_id", Just (showBS _gameid))]
+  req <- mkRequest ("Mods/" <> modId) [("game_id", Just (showBS _gameid))]
   response <- httpJSON' req
   pure $ getResponseBody response
 
@@ -232,11 +258,7 @@ main = do
       pass <- liftIO getPassword
       unlessM (login user pass) (liftIO exitFailure)
     modid <- liftIO $ runWithLabel "ModId" B.getLine
-    modInfo <- getModInfo modid
-    case modInfo of
-      [] -> liftIO $ putStrLn "No files found"
-      xs@(x:_) -> liftIO $ do
-        putStrLn $ "Mod: " <> _name x
-        putStrLn $ "Number of files: " <> show (length xs)
-        putStrLn $ "First file download: " <> _uri x
+    ModInfo{..} <- getModInfo modid
+    liftIO $ putStrLn $ "Mod: " <> _name
+    liftIO $ putStrLn $ "Summary: " <> _summary
   B.writeFile configFile (C.encode env)
