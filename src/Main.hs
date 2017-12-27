@@ -223,7 +223,7 @@ httpJSON' request = do
   pure response
 
 download :: Request -> FilePath -> IO ()
-download req dest = displayConsoleRegions . runConduitRes $ do
+download req dest = runConduitRes $ do
     Just (Window _h w) <- liftIO size
     mgr <- liftIO $ newManager tlsManagerSettings
     src <- http req mgr
@@ -323,5 +323,5 @@ main = do
             req <- parseRequest _URI
             req' <- mkRequest (host req) (path req) []
             let req'' = req' { queryString = queryString req }
-            liftIO $ download req'' filename
+            liftIO $ displayConsoleRegions $ download req'' filename
   B.writeFile configFile (C.encode env)
