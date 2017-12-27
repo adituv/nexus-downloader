@@ -11,32 +11,35 @@
 module Main where
 
 import           Conduit
-import           Control.Exception     (bracket_)
+import           Control.Exception            (bracket_)
 import           Control.Monad.IfElse
 import           Control.Monad.Reader
 import           Data.Aeson
-import           Data.ByteString       (ByteString)
-import qualified Data.ByteString       as B
-import qualified Data.ByteString.Char8 as C8S
-import           Data.Char             (toUpper)
+import           Data.ByteString              (ByteString)
+import qualified Data.ByteString              as B
+import qualified Data.ByteString.Char8        as C8S
+import           Data.Char                    (toUpper)
 import           Data.IORef
-import           Data.Semigroup        ((<>))
-import qualified Data.Serialize        as C
-import           Data.String           (IsString (..))
-import           Data.Time.Clock       (addUTCTime, getCurrentTime)
+import           Data.Semigroup               ((<>))
+import qualified Data.Serialize               as C
+import           Data.String                  (IsString (..))
+import           Data.Time.Clock              (addUTCTime, getCurrentTime)
 import           GHC.Generics
 import           Lens.Micro
-import           Network.HTTP.Client   (insertCheckedCookie)
-import           Network.HTTP.Conduit  (Cookie (..), CookieJar (..),
-                                        Request (..), createCookieJar,
-                                        destroyCookieJar, http, newManager,
-                                        responseCookieJar, tlsManagerSettings)
+import           Network.HTTP.Client          (insertCheckedCookie)
+import           Network.HTTP.Conduit         (Cookie (..), CookieJar (..),
+                                               Request (..), createCookieJar,
+                                               destroyCookieJar, http,
+                                               newManager, responseCookieJar,
+                                               tlsManagerSettings)
 import           Network.HTTP.Simple
-import           System.Directory      (doesFileExist)
-import           System.Exit           (exitFailure)
-import           System.IO             (hFlush, hGetEcho, hSetEcho, stdin,
-                                        stdout)
-import           System.IO.Unsafe      (unsafePerformIO)
+import           System.Console.AsciiProgress
+import           System.Console.Terminal.Size
+import           System.Directory             (doesFileExist)
+import           System.Exit                  (exitFailure)
+import           System.IO                    (hFlush, hGetEcho, hSetEcho,
+                                               stdin, stdout)
+import           System.IO.Unsafe             (unsafePerformIO)
 
 data Env = Env
   { _baseurl :: ByteString
@@ -220,11 +223,31 @@ httpJSON' request = do
   pure response
 
 download :: Request -> FilePath -> IO ()
-download req dest = runConduitRes $ do
-  mgr <- liftIO $ newManager tlsManagerSettings
-  src <- http req mgr
-  let body = getResponseBody src
-  body $$+- sinkFile dest
+download req dest = displayConsoleRegions . runConduitRes $ do
+    Just (Window _h w) <- liftIO size
+    mgr <- liftIO $ newManager tlsManagerSettings
+    src <- http req mgr
+    let body = getResponseBody src
+    let Just (fsize, _) = C8S.readInteger . head . getResponseHeader "Content-Length" $ src
+    pg <- liftIO $ newProgressBar def { pgFormat = format, pgTotal = fsize, pgWidth = w }
+    body $$+- printProgress pg =$ sinkFile dest
+  where
+    shorten str
+      | length str > 25 = take 22 str ++ "..."
+      | otherwise = str
+    format = shorten dest <> " [:bar] :percent (:eta s)"
+
+printProgress :: MonadResource m => ProgressBar -> Conduit ByteString m ByteString
+printProgress pg = loop
+  where
+    loop = do
+      bytes <- await
+      case bytes of
+        Nothing -> pure ()
+        Just bs -> do
+          let len = B.length bs
+          liftIO $ tickN pg len
+          loop
 
 login :: (MonadReader Env m, MonadIO m) => ByteString -> ByteString -> m Bool
 login user pass = do
