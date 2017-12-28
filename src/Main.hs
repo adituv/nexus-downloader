@@ -24,6 +24,7 @@ import           Data.Semigroup               ((<>))
 import qualified Data.Serialize               as C
 import           Data.String                  (IsString (..))
 import           Data.Time.Clock              (addUTCTime, getCurrentTime)
+import           Extra.Instances              ()
 import           GHC.Generics
 import           Lens.Micro
 import           Network.HTTP.Client          (insertCheckedCookie)
@@ -68,7 +69,7 @@ instance C.Serialize Env where
       C.put _game
       C.put _gameid
       C.put _nmmVer
-      C.put (show <$> destroyCookieJar cookies)
+      C.put (destroyCookieJar cookies)
     where
       cookies = unsafePerformIO (readIORef _cookies)
 
@@ -77,7 +78,7 @@ instance C.Serialize Env where
       _game <- C.get
       _gameid <- C.get
       _nmmVer <- C.get
-      cookies <- fmap read <$> C.get @[String]
+      cookies <- C.get
       let _cookies = unsafePerformIO $ newIORef (createCookieJar cookies)
       pure Env{..}
 
