@@ -16,8 +16,9 @@ extra-source-files:  README.md
 executable nexusdownloader
   hs-source-dirs:      src
   main-is:             Main.hs
-  other-modules:       Extra.Instances
+  other-modules:       App, Extra, Extra.Instances, Nexus.API, Nexus.Types, Types
   default-language:    Haskell2010
+  ghc-options:         -Wall -fwarn-orphans
   build-depends:       base >= 4.7 && < 5
                      , aeson
                      , ascii-progress
@@ -25,10 +26,11 @@ executable nexusdownloader
                      , cereal
                      , conduit-combinators
                      , directory
+                     , echo
                      , http-client
                      , http-conduit
                      , IfElse
-                     , microlens
+                     , microlens-platform
                      , mtl
                      , resourcet
                      , terminal-size

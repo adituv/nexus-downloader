@@ -1,8 +1,10 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 {-# LANGUAGE DeriveGeneric      #-}
 {-# LANGUAGE StandaloneDeriving #-}
 module Extra.Instances() where
 
-import           Data.Serialize(Serialize(..))
+import           Data.Serialize       (Serialize (..))
 import           Data.Time.Calendar   (Day (..))
 import           Data.Time.Clock      (DiffTime, UTCTime (..),
                                        diffTimeToPicoseconds)

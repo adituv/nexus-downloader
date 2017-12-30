@@ -1,0 +1,28 @@
+{
+    "name": "Test Bundle",
+    "version": 1,
+    "update_url": "",
+    "files": [
+        {
+            "filename": "Craftable Dragon Priest Masks",
+            "fileid": 4318,
+            "modname": "Craftable Unenchanted Unique Armors and Weapons",
+            "modid": 1234,
+            "optional": false
+        },
+        {
+            "filename": "Craftable Thieves Guild Armor",
+            "fileid": 5012,
+            "modname": "Craftable Unenchanted Unique Armors and Weapons",
+            "modid": 1234,
+            "optional": false
+        },
+        {
+            "filename": "Craftable Nightingale Armor",
+            "fileid": 4304,
+            "modname": "Craftable Unenchanted Unique Armors and Weapons",
+            "modid": 1234,
+            "optional": true
+        }
+    ]
+}
